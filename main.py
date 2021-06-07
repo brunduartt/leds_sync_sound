@@ -3,8 +3,63 @@ import wave
 import os
 import numpy as np
 import requests
-defaultframes = 512
+import scipy.signal as signal
+import threading
+from _thread import start_new_thread
+
+from tkinter import *
 import socket
+defaultframes = 512
+sensitivity = None
+B, A = None, None
+isStreaming = False
+oldData = None
+def stopStartStreaming():
+    global isStreaming
+    isStreaming = not isStreaming
+    print(isStreaming)
+
+def sendData():
+    global B, A, isStreaming, oldData
+    if isStreaming:
+        readed = stream.read(defaultframes, exception_on_overflow = False)
+        data = np.frombuffer(readed, dtype=np.int16)
+        dataToRead = None
+        if oldData is not None:
+            dataToRead = oldData + data
+        else:
+            dataToRead = data
+        dataF = signal.filtfilt(B, A, dataToRead)
+        peak = np.average(np.abs(dataF)) * sensitivity.get()
+        v = (peak / 2 ** 16)
+        if v > 1:
+            v = 1
+        pixels = int(255 * v)
+        oldData = data
+        sock.sendto(bytes([pixels]), ("192.168.0.246", 7777))
+
+def updateButterFilter():
+    global B, A
+    B, A = signal.butter(N.get(), Wn.get(), output='ba')
+
+
+def listenAudio():
+    global deviceRate, framesPerBuffer, recordtime, N, Wn, B, A
+    updateButterFilter()
+    if recordtime is 0:
+        while True:
+            sendData()
+    else:
+        for i in range(0, int(deviceRate / framesPerBuffer * recordtime)):
+            sendData()
+    #Stop Recording
+    stream.stop_stream()
+    stream.close()
+
+    #Close module
+    p.terminate()
+
+
 class textcolors:
     if not os.name == 'nt':
         blue = '\033[94m'
@@ -22,7 +77,7 @@ class textcolors:
 recorded_frames = []
 device_info = {}
 useloopback = False
-recordtime = 5
+recordtime = 0
 
 #Use module
 p = pyaudio.PyAudio()
@@ -73,7 +128,6 @@ else:
         exit()
 
 recordtime = int(input("Record time in seconds [" + textcolors.blue + str(recordtime) + textcolors.end + "]: ") or recordtime)
-
 #Open stream
 channelcount = device_info["maxInputChannels"] if (device_info["maxOutputChannels"] < device_info["maxInputChannels"]) else device_info["maxOutputChannels"]
 selectedIndex = device_info["index"];
@@ -90,26 +144,33 @@ stream = p.open(format = pyaudio.paInt16,
 #Start Recording
 print (textcolors.blue + "Starting..." + textcolors.end)
 oldValue = 0
+
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sensitivity = 45
-for i in range(0, int(deviceRate / framesPerBuffer * recordtime)):
-    readed = stream.read(defaultframes, exception_on_overflow = False)
-    data = np.frombuffer(readed, dtype=np.int16)
-    peak = np.max(np.abs(data)) * sensitivity
-    v = (peak / 2 ** 16)
-    if v > 1:
-        v = 1
-    pixels = int(255 * v)
-    sock.sendto(bytes([pixels]), ("192.168.0.246", 7777))
     # url = 'http://192.168.0.246/soundReactive?value='+str(bars)
     # requests.post(url)
 
+print_lock = threading.Lock()
+print_lock.acquire()
+root = Tk()
+sensitivity = DoubleVar(root)
+N = DoubleVar(root)    # Filter order
+Wn = DoubleVar(root) # Cutoff frequency
+root.title("Ajustes")
+Wn.set(0.07)
+N.set(1)
+sensitivity.set(10)
+Wnscale = Scale(root, from_=0.0, to=0.2, resolution=0.01, orient=HORIZONTAL, variable=Wn)
+Wnscale.pack(anchor=CENTER)
+NScale = Scale(root, from_=0, to=10, orient=HORIZONTAL, variable=N)
+NScale.pack(anchor=CENTER)
+Button(root, text="Update Filter", command=updateButterFilter).pack(anchor=CENTER)
+w2 = Scale(root, from_=0, to=100, orient=HORIZONTAL, variable=sensitivity)
+w2.pack(anchor=CENTER)
+Button(root, text="Stop/Start Streaming", command=stopStartStreaming).pack(anchor=CENTER)
+
+start_new_thread(listenAudio, ())
+root.mainloop()
+
+
 
 print (textcolors.blue + "End." + textcolors.end)
-#Stop Recording
-
-stream.stop_stream()
-stream.close()
-
-#Close module
-p.terminate()
